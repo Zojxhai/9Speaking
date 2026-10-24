@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,24 +10,44 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
 
+// Serve static assets from any possible folder structure
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, '9speaking-app', 'public')));
+app.use(express.static(__dirname));
+
+// Smart route for Homepage (checks all common locations for index.html)
+app.get('/', (req, res) => {
+  const candidatePaths = [
+    path.join(__dirname, 'public', 'index.html'),
+    path.join(__dirname, '9speaking-app', 'public', 'index.html'),
+    path.join(__dirname, 'index.html'),
+    path.join(__dirname, '9speaking-app', 'index.html')
+  ];
+
+  for (const filePath of candidatePaths) {
+    if (fs.existsSync(filePath)) {
+      return res.sendFile(filePath);
+    }
+  }
+
+  res.status(404).send('Server is running, but index.html could not be found. Please check your GitHub repository files.');
+});
+
+// Evaluation API
 app.post('/api/evaluate', async (req, res) => {
-  console.log('\n----------------------------------------');
-  console.log('[Backend] Received new evaluation request.');
+  console.log('\n[Backend] Received evaluation request.');
 
   try {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
 
-    if (!apiKey || apiKey.includes('YourActualSecretKeyHere')) {
-      console.error('[Backend Error] GEMINI_API_KEY is missing or unchanged in .env file!');
+    if (!apiKey) {
       return res.status(400).json({
-        error: 'Your Gemini API key is missing. Please set GEMINI_API_KEY in your .env file.'
+        error: 'GEMINI_API_KEY is missing on Render. Please add it under Environment Variables in Render dashboard.'
       });
     }
 
     const { promptContext, candidateText, audioBase64, mimeType } = req.body;
-    console.log(`[Backend] Audio attached: ${Boolean(audioBase64)} | Text provided: ${Boolean(candidateText)}`);
 
     const systemInstruction = `You are a certified IELTS Speaking Examiner.
 Your task:
@@ -73,13 +94,9 @@ Respond with ONLY valid JSON:
       text: `${promptContext}\nCandidate Transcript (if available): "${candidateText || ''}". Transcribe audio verbatim and evaluate.`
     });
 
-    // Directly target active gemini-3.8-flash with a 120-second window
     const model = 'gemini-3.8-flash';
-    console.log(`[Backend] Calling Google Gemini (${model})...`);
-
-    const startTime = Date.now();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000); // 120s timeout
+    const timeout = setTimeout(() => controller.abort(), 120000);
 
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -93,7 +110,7 @@ Respond with ONLY valid JSON:
             responseMimeType: 'application/json',
             temperature: 0.2,
             thinkingConfig: {
-              thinkingLevel: 'LOW' // Minimizes latency on Gemini 3.8 Flash
+              thinkingLevel: 'LOW'
             }
           }
         }),
@@ -102,32 +119,26 @@ Respond with ONLY valid JSON:
 
       clearTimeout(timeout);
 
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
       if (response.ok) {
         const data = await response.json();
         const resultJson = JSON.parse(data.candidates[0].content.parts[0].text);
         resultJson.engineName = `Gemini AI (${model} Multimodal)`;
-        console.log(`[Backend] Evaluation successful in ${elapsed}s!`);
         return res.json(resultJson);
       } else {
         const errData = await response.json().catch(() => ({}));
         const errMsg = errData.error?.message || `Google returned HTTP ${response.status}`;
-        console.error(`[Backend Error] ${model} rejected: ${errMsg}`);
         return res.status(response.status).json({ error: errMsg });
       }
     } catch (err) {
       clearTimeout(timeout);
       const errMsg = err.name === 'AbortError' ? 'Request timed out after 120 seconds' : err.message;
-      console.error(`[Backend Error]: ${errMsg}`);
       return res.status(504).json({ error: errMsg });
     }
   } catch (error) {
-    console.error('[Backend Uncaught Error]:', error);
     return res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`9Speaking server running on http://localhost:${PORT}`);
+  console.log(`9Speaking server running on port ${PORT}`);
 });
